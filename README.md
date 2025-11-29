@@ -25,10 +25,6 @@ This project ensures data privacy and integrity using encryption and secure acce
 ---
 
 
-*(You can update this structure to match your folder contents)*
-
----
-
 ## 🔒 Security Considerations
 
 - Ensures confidentiality of patient records
