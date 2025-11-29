@@ -1,0 +1,248 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Patient Data Secure Demo</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; padding: 24px; max-width: 820px; margin: auto; }
+    label { display:block; margin-top:12px; font-weight:600; }
+    input, textarea { width:100%; padding:8px; margin-top:6px; box-sizing:border-box; }
+    button { margin-top:12px; padding:10px 14px; font-weight:600; border-radius:6px; }
+    .note { font-size:0.9rem; color:#555; margin-top:8px }
+    .success { color: green; margin-top:8px }
+    .error { color: red; margin-top:8px }
+    pre { background:#f6f6f6; padding:12px; overflow:auto; }
+  </style>
+</head>
+<body>
+  <h1>Patient Data</h1>
+
+
+  <form id="form">
+    <label>Patient ID
+      <input id="patientId" required placeholder="e.g. P-001" />
+    </label>
+
+    <label>Patient name
+      <input id="name" required placeholder="Full name" />
+    </label>
+
+    <label>Patient notes
+      <textarea id="notes" rows="6" placeholder="Medical history or notes"></textarea>
+    </label>
+
+    <label>Password
+      <input id="passphrase" type="password" required placeholder="Enter a password" />
+    </label>
+
+     <label>Optional: number of PBKDF2 iterations (higher ⇒ more CPU work)
+      <input id="iterations" type="number" value="200000" min="10000" />
+    </label>
+
+    <button type="submit">Submit</button>
+  </form>
+
+  <div id="status"></div>
+
+  <h2>Stored records</h2>
+  <button id="refresh">Refresh list</button>
+  <div id="records"></div>
+
+  <hr>
+  <h2>Retrieve a Record</h2>
+  <p class="note">
+    Enter the patient ID and the same password used earlier to decrypt their stored record.
+  </p>
+
+  <label>Patient ID
+    <input id="retrieveId" placeholder="e.g. P-001" />
+  </label>
+
+  <label>Password
+    <input id="retrievePass" type="password" placeholder="Enter same password" />
+  </label>
+
+  <button id="retrieveBtn">Get Data</button>
+
+  <pre id="decryptedOutput" style="margin-top:10px; white-space:pre-wrap;"></pre>
+
+<script>
+/*
+Client-side encryption steps:
+1. Generate random salt
+2. Derive key from passphrase using PBKDF2 (SHA-256)
+3. Generate random IV
+4. Encrypt JSON record with AES-GCM
+5. Send { salt, iv, ciphertext } (all Base64) + meta fields to server
+*/
+
+// Base64 conversion helpers
+function b64(arrBuf) {
+  return btoa(String.fromCharCode(...new Uint8Array(arrBuf)));
+}
+function fromB64(b64str) {
+  const binary = atob(b64str);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; ++i) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+// Derive AES-GCM key from passphrase
+async function deriveKey(passphrase, salt, iterations) {
+  const enc = new TextEncoder();
+  const passKey = await crypto.subtle.importKey('raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      salt: salt,
+      iterations: iterations,
+      hash: 'SHA-256'
+    },
+    passKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+// Encrypt data
+async function encryptRecord(obj, passphrase, iterations) {
+  const enc = new TextEncoder();
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const key = await deriveKey(passphrase, salt, iterations);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const plaintext = enc.encode(JSON.stringify(obj));
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, plaintext);
+  return {
+    salt: b64(salt.buffer),
+    iv: b64(iv.buffer),
+    ciphertext: b64(ciphertext)
+  };
+}
+
+// Form submission (encrypt & send)
+document.getElementById('form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const patientId = document.getElementById('patientId').value.trim();
+  const name = document.getElementById('name').value.trim();
+  const notes = document.getElementById('notes').value;
+  const passphrase = document.getElementById('passphrase').value;
+  const iterations = Number(document.getElementById('iterations').value) || 200000;
+
+  if (!patientId || !name || !passphrase) {
+    showStatus('Please fill in all required fields.', true);
+    return;
+  }
+
+  showStatus('Encrypting...', false);
+  try {
+    const recordObj = {
+      patientId,
+      name,
+      notes,
+      createdAt: new Date().toISOString()
+    };
+    const payload = await encryptRecord(recordObj, passphrase, iterations);
+    const meta = { name, patientId, clientCreatedAt: new Date().toISOString(), iterations };
+
+    const resp = await fetch('/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ meta, payload })
+    });
+
+    const j = await resp.json();
+    if (resp.ok) {
+      showStatus('Encrypted record stored on server at ' + j.storedAt, false, true);
+      document.getElementById('form').reset();
+      loadRecords();
+    } else {
+      showStatus('Server error: ' + (j.error || 'unknown'), true);
+    }
+  } catch (err) {
+    console.error(err);
+    showStatus('Encryption or network error: ' + err.message, true);
+  }
+});
+
+// Show status messages
+function showStatus(msg, isError=false, isSuccess=false) {
+  const d = document.getElementById('status');
+  d.innerHTML = '';
+  const p = document.createElement('div');
+  p.textContent = msg;
+  p.className = isError ? 'error' : (isSuccess ? 'success' : 'note');
+  d.appendChild(p);
+}
+
+// Load encrypted records
+async function loadRecords() {
+  const rdiv = document.getElementById('records');
+  rdiv.innerHTML = '<em>Loading...</em>';
+  try {
+    const resp = await fetch('/records');
+    const arr = await resp.json();
+    if (!Array.isArray(arr)) throw new Error('Invalid server response.');
+
+    if (arr.length === 0) {
+      rdiv.innerHTML = '<em>No records stored yet.</em>';
+      return;
+    }
+    const pre = document.createElement('pre');
+    pre.textContent = JSON.stringify(arr.map(x => ({
+      meta: x.meta,
+      payloadSummary: {
+        salt: x.payload.salt.slice(0,8) + '...',
+        iv: x.payload.iv.slice(0,8) + '...',
+        ciphertextLen: x.payload.ciphertext.length
+      },
+      storedAt: x.storedAt
+    })), null, 2);
+    rdiv.innerHTML = '';
+    rdiv.appendChild(pre);
+  } catch (err) {
+    rdiv.innerHTML = '<span class="error">Error loading records: ' + err.message + '</span>';
+  }
+}
+
+document.getElementById('refresh').addEventListener('click', loadRecords);
+
+// Retrieve & decrypt logic
+document.getElementById('retrieveBtn').addEventListener('click', async () => {
+  const id = document.getElementById('retrieveId').value.trim();
+  const passphrase = document.getElementById('retrievePass').value.trim();
+
+  if (!id || !passphrase) {
+    alert("Please enter both Patient ID and Password.");
+    return;
+  }
+
+  try {
+    const resp = await fetch('/getRecord?id=' + encodeURIComponent(id));
+    const j = await resp.json();
+
+    if (!j || !j.payload) {
+      alert("Record not found.");
+      return;
+    }
+
+    const salt = new Uint8Array(fromB64(j.payload.salt));
+    const iv = new Uint8Array(fromB64(j.payload.iv));
+    const ciphertext = new Uint8Array(fromB64(j.payload.ciphertext));
+    const key = await deriveKey(passphrase, salt, j.meta && j.meta.iterations ? j.meta.iterations : 200000);
+    const decryptedBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv }, key, ciphertext);
+    const dec = new TextDecoder().decode(decryptedBuf);
+
+    document.getElementById('decryptedOutput').textContent = dec;
+  } catch (err) {
+    console.error(err);
+    alert("Error decrypting record. Please check the console for details.");
+  }
+});
+
+// Load records initially
+loadRecords();
+</script>
+</body>
+</html>

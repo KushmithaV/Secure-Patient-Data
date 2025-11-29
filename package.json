@@ -1,0 +1,16 @@
+{
+  "name": "patient-data-encrypt-demo",
+  "version": "1.0.0",
+  "description": "Simple demo: client-side encrypt patient data, server stores encrypted blobs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "body-parser": "^1.20.2",
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}
